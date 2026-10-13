@@ -324,7 +324,18 @@ class SmartRouterMiddleware(AgentMiddleware[Any, Any]):
             pass
         try:
             default = self._config.pick_default_model_ref()
-            return str(default or "")
+            # The snapshot may still list a provider/model disabled after the
+            # agent was built (no rebuild). Validate against the LIVE factory
+            # set so a disabled provider can never become the initial ref.
+            # Fail-open: when the live set is unavailable, keep old behavior.
+            live = self._enabled_refs()
+            if default and (not live or default in live):
+                return str(default)
+            if live:
+                best = pick_fastest_model_ref(live)
+                if best:
+                    return str(best)
+            return ""
         except Exception:
             return ""
 
