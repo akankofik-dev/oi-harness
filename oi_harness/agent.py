@@ -44,6 +44,7 @@ from oi_harness.middleware.model_settings import ModelSettingsMiddleware
 from oi_harness.middleware.pii import detect_pii
 from oi_harness.middleware.session_header import SessionHeaderMiddleware
 from oi_harness.middleware.skill_filter import SkillFilterMiddleware, render_slash_skill_prompt
+from oi_harness.middleware.smart_router import SmartRouterMiddleware
 from oi_harness.middleware.tool_order import TaskToolLastMiddleware
 from oi_harness.middleware.tool_search import ToolSearchMiddleware
 from oi_harness.middleware.tools_filter import ToolsFilterMiddleware
@@ -1438,10 +1439,25 @@ class HarnessAgent:
         cfg = self._config
         chain: list[Any] = [
             ModelRouterMiddleware(cfg, self._model_factory, get_protocol=self._get_protocol),
-            ModelSettingsMiddleware(),
-            SessionHeaderMiddleware(),
-            SkillFilterMiddleware(config=cfg),
         ]
+        # Smart router: latency tracking + bounded failover (max 3).
+        # Kill-switch via config: smart_router_enabled=False disables entirely.
+        if getattr(cfg, "smart_router_enabled", True):
+            chain.append(
+                SmartRouterMiddleware(
+                    cfg,
+                    self._model_factory,
+                    get_protocol=self._get_protocol,
+                    max_attempts=getattr(cfg, "smart_router_max_attempts", 3),
+                )
+            )
+        chain.extend(
+            [
+                ModelSettingsMiddleware(),
+                SessionHeaderMiddleware(),
+                SkillFilterMiddleware(config=cfg),
+            ]
+        )
 
         if cfg.tool_guard_enabled:
             from oi_harness.middleware.tool_guard import ToolGuardMiddleware
