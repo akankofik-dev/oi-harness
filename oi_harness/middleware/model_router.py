@@ -77,6 +77,21 @@ class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
             configurable = {}
             if isinstance(runtime_config_value, dict):
                 runtime_config_value["configurable"] = configurable
+        # Manual-selection signal for downstream middleware (e.g. SmartRouter):
+        # True when the caller explicitly provided a model ref via
+        # ``configurable["model"]`` (e.g. ChatRequest.model override). When the
+        # ref comes from the default chain instead, it is auto-routing.
+        # The caller (oi-agent) may pre-set ``_model_manual`` explicitly since
+        # it always passes a concrete model; do not overwrite in that case.
+        # Fail-open: stamping never raises.
+        try:
+            if "_model_manual" not in configurable:
+                explicit = configurable.get("model")
+                configurable["_model_manual"] = bool(
+                    isinstance(explicit, str) and explicit.strip()
+                )
+        except Exception:
+            pass
         ref = resolve_turn_model_ref(
             pick_default_ref=self._config.pick_default_model_ref,
             configurable=configurable,
