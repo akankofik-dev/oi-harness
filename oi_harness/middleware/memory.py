@@ -35,9 +35,11 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from oi_harness.middleware.memory_recall import (
+    DEFAULT_RECALL_BUDGET_TOKENS,
     has_recall_snapshot,
     replay_recall_snapshots,
     stamp_recall_snapshot,
+    truncate_to_token_budget,
 )
 
 if TYPE_CHECKING:
@@ -130,6 +132,12 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             append it to that message; historical snapshots always replay.
         recall_limit: Per-turn recall snippet cap. Forwarded to
             :meth:`MemoryService.recall`.
+        recall_budget_tokens: Hard per-turn token cap for injected recall,
+            following the octop-memory pattern ("recall that fits the
+            prompt"). Enforced as a safety net on the rendered recall even
+            when the bound service does not expose its own budget knob.
+            Defaults to 1500 — far below 20% of any realistic context
+            window, so recall can never push a turn to 100%.
         capture_enabled: When ``True`` and a service is bound, the middleware
             captures each turn as L0 raw events via
             :meth:`MemoryService.capture_turn` after the model call. Run on a
@@ -164,6 +172,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         service: MemoryService | None = None,
         recall_inject_enabled: bool = True,
         recall_limit: int = 5,
+        recall_budget_tokens: int = DEFAULT_RECALL_BUDGET_TOKENS,
         capture_enabled: bool = True,
         extract_idle_seconds: float = 0.0,
         extract_interval_seconds: float = 0.0,
@@ -182,6 +191,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self._service = service
         self._recall_inject_enabled = recall_inject_enabled
         self._recall_limit = recall_limit
+        self._recall_budget_tokens = recall_budget_tokens
         self._capture_enabled = capture_enabled
         self._extract_idle_seconds = extract_idle_seconds
         # Fixed-interval extraction: when > 0 a single repeating timer sweeps
@@ -461,16 +471,45 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 logger.info("memory.recall skip: maintenance %s", self.maintenance_status()["phase"])
             elif query:
                 assert self._service is not None  # gated by caller
-                result = self._service.recall(
-                    query, thread_id=thread_id, session_id=session_id, limit=self._recall_limit
-                )
+                recall_kwargs: dict[str, Any] = {
+                    "thread_id": thread_id,
+                    "session_id": session_id,
+                    "limit": self._recall_limit,
+                }
+                # Octop pattern: push the token budget into the recall call
+                # when the bound service exposes the knob (newer oi_memory
+                # does via recall_for_prompt; MemoryService.recall may not).
+                # Fail-open: fall back to limit-only on any mismatch.
+                try:
+                    import inspect as _inspect
+
+                    if "total_budget_tokens" in _inspect.signature(
+                        self._service.recall
+                    ).parameters:
+                        recall_kwargs["total_budget_tokens"] = self._recall_budget_tokens
+                except Exception:
+                    pass
+                result = self._service.recall(query, **recall_kwargs)
                 rendered = getattr(result, "rendered", None) or ""
+                # Safety net: hard-cap injected recall to the token budget no
+                # matter what the service returned (older oi_memory, custom
+                # service, or an unusually large rendered block).
+                capped = truncate_to_token_budget(rendered, self._recall_budget_tokens)
+                if capped != rendered:
+                    logger.info(
+                        "memory.recall budget-truncated thread=%s chars=%d->%d",
+                        thread_id,
+                        len(rendered),
+                        len(capped),
+                    )
+                    rendered = capped
                 logger.info(
-                    "memory.trigger recall_inject thread=%s session=%s query=%r limit=%d hit=%s",
+                    "memory.trigger recall_inject thread=%s session=%s query=%r limit=%d budget=%d hit=%s",
                     thread_id,
                     session_id,
                     query[:60],
                     self._recall_limit,
+                    self._recall_budget_tokens,
                     bool(rendered),
                 )
         except Exception:  # recall injection is best-effort; pylint: disable=broad-except
