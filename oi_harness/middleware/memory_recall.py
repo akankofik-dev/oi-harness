@@ -17,6 +17,82 @@ from langchain_core.messages.utils import MessageLikeRepresentation, convert_to_
 
 RECALL_SNAPSHOT_KEY = "_oi_memory_recall"
 
+# ---------------------------------------------------------------------------
+# Token-budget safety net (Octop pattern: "recall that fits the prompt").
+#
+# TencentCloud/octop-memory enforces per-call token budgets in its recall
+# pipeline (default 1500 tokens, atoms 70% / quotes 20% / headlines 10%).
+# The Oi middleware cannot always reach that knob — MemoryService.recall()
+# only exposes ``limit`` — so we enforce a defensive post-hoc cap here as
+# well. This keeps recall a small, bounded fraction of the prompt no
+# matter which oi_memory version (or custom service) is bound.
+# ---------------------------------------------------------------------------
+
+DEFAULT_RECALL_BUDGET_TOKENS = 1500
+"""Default per-turn recall budget, mirroring octop-memory's conservative default.
+
+1500 tokens is far below 20% of any realistic context window, so recall can
+never be the thing that pushes a turn to 100%.
+"""
+
+_CHARS_PER_TOKEN_CJK = 2
+_CHARS_PER_TOKEN_ASCII = 4
+_CJK_START = 0x4E00
+_CJK_END = 0x9FFF
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate prompt tokens via the static char proxy (fail-open).
+
+    Same proxy octop-memory uses on its recall path: CJK chars count as
+    1 token per 2 chars, everything else 1 token per 4 chars. Coarse
+    (±10-20% vs a real tokenizer) but sufficient for budget decisions.
+    """
+    try:
+        if not text:
+            return 0
+        cjk = 0
+        other = 0
+        for ch in text:
+            cp = ord(ch)
+            if _CJK_START <= cp <= _CJK_END:
+                cjk += 1
+            else:
+                other += 1
+        cjk_tokens = (cjk + _CHARS_PER_TOKEN_CJK - 1) // _CHARS_PER_TOKEN_CJK
+        other_tokens = (other + _CHARS_PER_TOKEN_ASCII - 1) // _CHARS_PER_TOKEN_ASCII
+        return cjk_tokens + other_tokens
+    except Exception:
+        return 0
+
+
+def truncate_to_token_budget(rendered: str, budget_tokens: int) -> str:
+    """Truncate recall markdown to ``budget_tokens`` at a line boundary.
+
+    oi_memory renders one snippet per line, so cutting at a newline keeps
+    whole snippets and drops the tail. A ``…(truncated)`` marker records
+    the cut. Fail-open: any error returns the input unchanged.
+    """
+    try:
+        if not rendered or budget_tokens <= 0:
+            return rendered
+        if estimate_tokens(rendered) <= budget_tokens:
+            return rendered
+        lines = rendered.split("\n")
+        kept: list[str] = []
+        for line in lines:
+            candidate = "\n".join(kept + [line])
+            if estimate_tokens(candidate) > budget_tokens:
+                break
+            kept.append(line)
+        if not kept:
+            # Even the first line is over budget: hard-cut it char-wise.
+            approx_chars = budget_tokens * _CHARS_PER_TOKEN_ASCII
+            return rendered[:approx_chars] + "\n…(recall truncated to budget)"
+        return "\n".join(kept) + "\n…(recall truncated to budget)"
+    except Exception:
+        return rendered
+
 
 def _content_hash(content: Any) -> str:
     encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
