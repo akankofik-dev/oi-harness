@@ -88,10 +88,15 @@ def record_call(model_ref: str, latency_s: float, ok: bool) -> None:
         except (TypeError, ValueError):
             latency = 0.0
         # EWMA: first sample seeds the average, subsequent samples blend.
-        if n == 1:
-            avg = latency
+        # Failed calls only touch err/n counters — their latency must NOT
+        # pollute the EWMA, or a frequently-failing model would look faster.
+        if ok:
+            if n == 1:
+                avg = latency
+            else:
+                avg = EWMA_ALPHA * latency + (1.0 - EWMA_ALPHA) * prev_avg
         else:
-            avg = EWMA_ALPHA * latency + (1.0 - EWMA_ALPHA) * prev_avg
+            avg = prev_avg
         try:
             err = int(entry.get("err", 0))
         except (TypeError, ValueError):
