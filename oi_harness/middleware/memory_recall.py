@@ -40,6 +40,40 @@ _CHARS_PER_TOKEN_ASCII = 4
 _CJK_START = 0x4E00
 _CJK_END = 0x9FFF
 
+# Broader CJK script ranges used by the fallback char-ratio picker.
+# (estimate_tokens keeps its original narrow 4E00-9FFF proxy untouched;
+# this is only consulted for the first-line hard-cut in
+# truncate_to_token_budget.)
+_CJK_RANGES = (
+    (0x3400, 0x4DBF),  # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0x3040, 0x30FF),  # Hiragana + Katakana
+    (0xAC00, 0xD7AF),  # Hangul Syllables
+)
+_CJK_RATIO_THRESHOLD = 0.5
+
+
+def _is_cjk_char(cp: int) -> bool:
+    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
+
+
+def _chars_per_token_for(text: str) -> int:
+    """Pick the chars/token proxy for the fallback hard-cut (fail-open).
+
+    CJK-heavy text (>50% CJK chars) gets 2 chars/token; everything else
+    keeps the historical ASCII proxy of 4 chars/token. Any failure falls
+    back to the ASCII ratio and never raises.
+    """
+    try:
+        if not text:
+            return _CHARS_PER_TOKEN_ASCII
+        cjk = sum(1 for ch in text if _is_cjk_char(ord(ch)))
+        if cjk / len(text) > _CJK_RATIO_THRESHOLD:
+            return _CHARS_PER_TOKEN_CJK
+        return _CHARS_PER_TOKEN_ASCII
+    except Exception:
+        return _CHARS_PER_TOKEN_ASCII
+
 
 def estimate_tokens(text: str) -> int:
     """Estimate prompt tokens via the static char proxy (fail-open).
@@ -87,7 +121,10 @@ def truncate_to_token_budget(rendered: str, budget_tokens: int) -> str:
             kept.append(line)
         if not kept:
             # Even the first line is over budget: hard-cut it char-wise.
-            approx_chars = budget_tokens * _CHARS_PER_TOKEN_ASCII
+            # CJK-heavy text uses the 2-chars/token proxy so the cut lands
+            # at/under budget instead of overshooting by ~2x (the old
+            # ASCII-ratio fallback under-counted CJK tokens).
+            approx_chars = budget_tokens * _chars_per_token_for(rendered)
             return rendered[:approx_chars] + "\n…(recall truncated to budget)"
         return "\n".join(kept) + "\n…(recall truncated to budget)"
     except Exception:
