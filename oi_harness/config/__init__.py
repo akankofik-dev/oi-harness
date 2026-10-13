@@ -648,12 +648,6 @@ class HarnessAgentConfig:
     model_retry_initial_delay: float = 1.0
     model_retry_max_delay: float = 60.0
 
-    # —— Smart router (default ON): latency tracking + bounded cross-model
-    # failover. Picks the fastest enabled model by rolling latency stats and
-    # retries transient provider errors on a backup model (max attempts).
-    smart_router_enabled: bool = True
-    smart_router_max_attempts: int = 3
-
     # —— PII redaction (default ON: secrets in inputs/outputs/tool results
     # are masked with stars before reaching the model or session log).
     # The built-in detector covers LLM provider API keys; see
@@ -913,25 +907,9 @@ class HarnessAgentConfig:
         raise ValueError(f"Unknown provider {provider_key!r} in model ref {ref!r}")
 
     def pick_default_model_ref(self) -> str:
-        """Return ``default_model`` if set *and still enabled*, otherwise the fastest enabled model by latency stats."""
+        """Return ``default_model`` if set, otherwise the first enabled model."""
         if self.default_model:
-            # Validate against the live enabled set: a default that was
-            # disabled after the config snapshot was built must not be used.
-            try:
-                self.resolve_model_ref(self.default_model)
-                return self.default_model
-            except ValueError:
-                pass  # disabled/unknown -> fall through to enabled pick
-        # Smart routing: pilih model enabled dengan latency terendah dari stats.
-        # Fail-open: jika stats tidak ada/rusak, fallback ke perilaku lama (alfabetis).
-        try:
-            from oi_harness.middleware.model_stats import pick_fastest_model_ref
-            refs = [f"{p.id}/{m.id}" for p in self.providers for m in p.enabled_models()]
-            best = pick_fastest_model_ref(refs)
-            if best:
-                return best
-        except Exception:
-            pass
+            return self.default_model
         for p in self.providers:
             for model in p.enabled_models():
                 return f"{p.id}/{model.id}"
@@ -1027,8 +1005,6 @@ class HarnessAgentConfig:
             "model_retry_max_retries": self.model_retry_max_retries,
             "model_retry_initial_delay": self.model_retry_initial_delay,
             "model_retry_max_delay": self.model_retry_max_delay,
-            "smart_router_enabled": self.smart_router_enabled,
-            "smart_router_max_attempts": self.smart_router_max_attempts,
             "pii_enabled": self.pii_enabled,
             "pii_strategy": self.pii_strategy,
             "pii_surfaces": list(self.pii_surfaces),
