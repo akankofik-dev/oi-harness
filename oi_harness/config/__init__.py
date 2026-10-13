@@ -913,9 +913,15 @@ class HarnessAgentConfig:
         raise ValueError(f"Unknown provider {provider_key!r} in model ref {ref!r}")
 
     def pick_default_model_ref(self) -> str:
-        """Return ``default_model`` if set, otherwise the fastest enabled model by latency stats."""
+        """Return ``default_model`` if set *and still enabled*, otherwise the fastest enabled model by latency stats."""
         if self.default_model:
-            return self.default_model
+            # Validate against the live enabled set: a default that was
+            # disabled after the config snapshot was built must not be used.
+            try:
+                self.resolve_model_ref(self.default_model)
+                return self.default_model
+            except ValueError:
+                pass  # disabled/unknown -> fall through to enabled pick
         # Smart routing: pilih model enabled dengan latency terendah dari stats.
         # Fail-open: jika stats tidak ada/rusak, fallback ke perilaku lama (alfabetis).
         try:
