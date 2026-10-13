@@ -329,9 +329,29 @@ class SmartRouterMiddleware(AgentMiddleware[Any, Any]):
             return ""
 
     def _enabled_refs(self) -> list[str]:
-        """All enabled ``provider/model`` refs, fail-open."""
+        """All enabled ``provider/model`` refs, fail-open.
+
+        Reads from the factory's *live* providers (synced by
+        ``sync_providers_to_harness`` on toggle), not from the frozen
+        ``self._config`` snapshot — so a model disabled *after* the agent
+        was built can never be picked as a failover backup.
+        Falls back to the snapshot only when the factory is unavailable.
+        """
         try:
             refs: list[str] = []
+            # Prefer the factory's fresh provider configs.
+            providers = getattr(self._factory, "_providers", None) or {}
+            if providers:
+                for pid, provider in providers.items():
+                    try:
+                        models = provider.enabled_models()
+                    except Exception:
+                        continue
+                    for model in models:
+                        refs.append(f"{pid}/{model.id}")
+                if refs:
+                    return refs
+            # Fallback: frozen config snapshot (pre-toggle behavior).
             for provider in getattr(self._config, "providers", None) or []:
                 for model in provider.enabled_models():
                     refs.append(f"{provider.id}/{model.id}")
