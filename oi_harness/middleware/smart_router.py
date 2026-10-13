@@ -110,9 +110,70 @@ class SmartRouterMiddleware(AgentMiddleware[Any, Any]):
         is_async: bool,
     ) -> Any:
         """Dispatch to the bounded sync/async failover core."""
+        # Manual selection: the user explicitly chose this model (via
+        # ChatRequest.model / per-thread picker / starred preferred model).
+        # SKIP the router's failover — use exactly the requested model and
+        # surface any error instead of silently switching to another model.
+        # Stats are still recorded (harmless, useful for latency tracking).
+        if self._is_manual_selection(request):
+            if is_async:
+                return self._acall_manual(request, handler)
+            return self._scall_manual(request, handler)
         if is_async:
             return self._acall_with_failover(request, handler)
         return self._scall_with_failover(request, handler)
+
+    def _is_manual_selection(self, request: ModelRequest) -> bool:
+        """True when the model was explicitly chosen by the user (not auto).
+
+        Signal is stamped by :class:`ModelRouterMiddleware` as
+        ``configurable["_model_manual"]`` when ``configurable["model"]`` was
+        explicitly provided by the caller. Fail-open: any error → False
+        (keeps previous auto/failover behavior).
+        """
+        try:
+            from oi_harness.middleware.runtime import runtime_config
+
+            cfg = runtime_config(request)
+            if isinstance(cfg, dict):
+                configurable = cfg.get("configurable")
+                if isinstance(configurable, dict):
+                    return bool(configurable.get("_model_manual"))
+        except Exception:
+            pass
+        return False
+
+    def _scall_manual(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Single attempt for manually-selected models: no failover."""
+        ref = self._initial_ref(request)
+        t0 = time.perf_counter()
+        try:
+            resp = handler(request)
+        except Exception as exc:
+            record_call(ref, 0.0, ok=False)
+            raise
+        record_call(ref, time.perf_counter() - t0, ok=True)
+        return resp
+
+    async def _acall_manual(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Single attempt for manually-selected models: no failover (async)."""
+        ref = self._initial_ref(request)
+        t0 = time.perf_counter()
+        try:
+            resp = await handler(request)
+        except Exception as exc:
+            record_call(ref, 0.0, ok=False)
+            raise
+        record_call(ref, time.perf_counter() - t0, ok=True)
+        return resp
 
     # ------------------------------------------------------------------
     # Failover cores — strictly bounded: ``for attempt in range(max_attempts)``
