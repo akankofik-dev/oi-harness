@@ -24,6 +24,7 @@ from langchain.agents.middleware import (
 
 from oi_harness.config import HarnessAgentConfig, ModelSelector
 from oi_harness.llm.factory import ChatModelFactory
+from oi_harness.middleware.model_stats import pick_fastest_model_ref
 from oi_harness.middleware.runtime import runtime_config
 from oi_harness.middleware.turn_model import (
     content_has_non_text,
@@ -93,18 +94,86 @@ class ModelRouterMiddleware(AgentMiddleware[Any, Any]):
         except Exception:
             pass
         ref = resolve_turn_model_ref(
-            pick_default_ref=self._config.pick_default_model_ref,
+            pick_default_ref=self._live_pick_default_ref,
             configurable=configurable,
             messages=list(request.messages or []),
             user_selector=self._user_selector,
             state=getattr(request, "state", None) or {},
             runtime_config=runtime_config_value,
-            pick_multimodal_ref=self._config.pick_multimodal_model_ref,
+            pick_multimodal_ref=self._live_pick_multimodal_ref,
         )
         # Stamp the live chat ref so extract can fall back to it when aux fails.
         if ref:
             configurable["model"] = ref
         return ref
+
+    def _live_enabled_refs(self) -> list[str]:
+        """All enabled ``provider/model`` refs from the factory's *live*
+        providers (synced on every provider toggle), fail-open.
+
+        Mirrors ``SmartRouterMiddleware._enabled_refs``: disabled providers
+        are removed from the factory by ``sync_providers_to_harness``, so a
+        provider disabled *after* the agent was built can never appear here —
+        unlike the frozen ``self._config`` snapshot.
+        """
+        try:
+            refs: list[str] = []
+            providers = getattr(self._factory, "_providers", None) or {}
+            for pid, provider in providers.items():
+                try:
+                    models = provider.enabled_models()
+                except Exception:
+                    continue
+                for model in models:
+                    refs.append(f"{pid}/{model.id}")
+            return refs
+        except Exception:
+            return []
+
+    def _live_pick_default_ref(self) -> str:
+        """Default ref validated against the *live* factory set.
+
+        ``HarnessAgentConfig.pick_default_model_ref`` validates only against
+        the frozen config snapshot, so an agent that was not rebuilt after a
+        provider/model was disabled could still return a stale ref here.
+        Re-check against the live factory; fall back to the fastest live ref.
+        Fail-open: when the factory set is unavailable, keep snapshot behavior.
+        """
+        try:
+            default = self._config.pick_default_model_ref()
+        except Exception:
+            default = ""
+        try:
+            live = self._live_enabled_refs()
+            if default and (not live or default in live):
+                return str(default)
+            if live:
+                best = pick_fastest_model_ref(live)
+                if best:
+                    return str(best)
+        except Exception:
+            pass
+        return str(default or "")
+
+    def _live_pick_multimodal_ref(self) -> str | None:
+        """Multimodal ref validated against the *live* factory set.
+
+        Returns ``None`` when the snapshot pick is no longer live-enabled so
+        the chain falls through to the (live-validated) default pick.
+        """
+        try:
+            mm = self._config.pick_multimodal_model_ref()
+        except Exception:
+            return None
+        if not mm:
+            return None
+        try:
+            live = self._live_enabled_refs()
+            if not live or mm in live:
+                return mm
+        except Exception:
+            return mm
+        return None
 
 
 def _request_needs_multimodal(request: ModelRequest) -> bool:
