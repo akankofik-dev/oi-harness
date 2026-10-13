@@ -15,6 +15,7 @@ from oi_harness.middleware.model_settings import (
 from oi_harness.middleware.native_tool_search import NativeToolSearchMiddleware
 from oi_harness.middleware.peer import PeerAgentMiddleware
 from oi_harness.middleware.pii import detect_pii
+from oi_harness.middleware.smart_router import SmartRouterMiddleware
 from oi_harness.middleware.tool_search import ToolSearchMiddleware
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "ModelSettingsMiddleware",
     "NativeToolSearchMiddleware",
     "PeerAgentMiddleware",
+    "SmartRouterMiddleware",
     "ToolSearchMiddleware",
     "detect_pii",
 ]
